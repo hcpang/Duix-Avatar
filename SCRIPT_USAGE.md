@@ -19,12 +19,20 @@ This guide shows you how to use the Python and Bash scripts to generate avatar v
    # Should show: duix-avatar-gen-video, duix-avatar-tts, duix-avatar-asr
    ```
 
-2. **Python 3.6+** with `requests` library:
+2. **Python 3.6+** with required libraries:
    ```bash
+   # Required for all scripts
    pip install requests
+
+   # Required for subtitle generation with accurate timing
+   pip install faster-whisper
    ```
 
 3. **Data directory**: `D:/duix_avatar_data/` must exist and be accessible to Docker
+
+4. **FFmpeg** (for subtitle burning):
+   - Included in `resources/ffmpeg/` folder
+   - Or install system-wide (auto-detected)
 
 ---
 
@@ -187,6 +195,105 @@ done
 
 ---
 
+### 4. `add_subtitles.py` - Add Subtitles to Videos
+
+**Purpose**: Generates accurate, time-synced SRT subtitle files and optionally burns them into videos using Whisper ASR for word-level timing.
+
+**Syntax**:
+```bash
+python scripts/add_subtitles.py <video_path> <text_file> [options]
+```
+
+**Parameters**:
+- `video_path`: Path to your video file (Windows path, e.g., `D:/duix_avatar_data/face2face/temp/video.mp4`)
+- `text_file`: Path to text file containing the spoken content
+- `--audio <path>`: (Recommended) Path to audio file for accurate timing with Whisper ASR
+- `--output <path>`: Output SRT file path (default: `subtitles.srt`)
+- `--burn`: Burn subtitles directly into the video
+- `--burn-output <path>`: Output video path when burning (default: `<video>_subtitled.mp4`)
+- `--font-size <size>`: Font size for burned subtitles (default: 24)
+- `--color <color>`: Subtitle color (default: yellow, options: white, yellow, red, green, blue, black)
+- `--max-chars <num>`: Maximum characters per subtitle line (default: 60)
+
+**Requirements**:
+```bash
+# Install faster-whisper for accurate timing
+pip install faster-whisper
+```
+
+**Examples**:
+
+#### Example 1: Generate SRT file only (with Whisper timing)
+```bash
+python scripts/add_subtitles.py \
+  "D:/duix_avatar_data/face2face/temp/video.mp4" \
+  my_script.txt \
+  --audio "D:/duix_avatar_data/face2face/temp/audio.wav" \
+  --output subtitles.srt
+```
+
+#### Example 2: Generate and burn subtitles into video
+```bash
+python scripts/add_subtitles.py \
+  "D:/duix_avatar_data/face2face/temp/video.mp4" \
+  my_script.txt \
+  --audio "D:/duix_avatar_data/face2face/temp/audio.wav" \
+  --burn \
+  --burn-output "D:/duix_avatar_data/face2face/temp/video_with_subs.mp4"
+```
+
+#### Example 3: Customize subtitle appearance
+```bash
+python scripts/add_subtitles.py \
+  "D:/duix_avatar_data/face2face/temp/video.mp4" \
+  my_script.txt \
+  --audio "D:/duix_avatar_data/face2face/temp/audio.wav" \
+  --burn \
+  --font-size 32 \
+  --color white
+```
+
+#### Example 4: Without Whisper (even distribution fallback)
+```bash
+# If you don't have the audio file, subtitles will be evenly distributed
+python scripts/add_subtitles.py \
+  "D:/duix_avatar_data/face2face/temp/video.mp4" \
+  my_script.txt \
+  --output subtitles.srt
+```
+
+**Features**:
+- **Whisper ASR Timing**: Uses faster-whisper to generate accurate word-level timestamps
+- **Automatic Fallback**: Falls back to even distribution if audio file not provided
+- **FFmpeg Integration**: Auto-detects FFmpeg in project resources or system PATH
+- **Customizable Appearance**: Control font size, color, and text length
+- **SRT Format**: Standard subtitle format compatible with all video players
+
+**Output**:
+- SRT file: Standard subtitle format with timestamps
+  ```
+  1
+  00:00:00,000 --> 00:00:05,299
+  Welcome to the deep dive. We're here to go cut through the noise
+
+  2
+  00:00:05,299 --> 00:00:11,759
+  and understand the complex systems driving things.
+  ```
+- Video with burned subtitles (optional): Yellow subtitles at bottom center by default
+
+**Time**:
+- SRT generation: 10-30 seconds (with Whisper)
+- Burning subtitles: Additional 30-60 seconds (depends on video length)
+
+**Technical Details**:
+- Uses faster-whisper "tiny" model for speed (can be changed to "base" or "small" for better accuracy)
+- Segments text at natural speech pauses for readability
+- Handles Windows/Docker path translation for FFmpeg subtitle filter
+- No re-encoding of video/audio (fast processing)
+
+---
+
 ## Common Workflows
 
 ### Workflow 1: Quick Test
@@ -239,7 +346,45 @@ done
 
 ---
 
-### Workflow 3: Separate TTS and Video Generation
+### Workflow 3: Generate Video with Subtitles
+
+Create a complete video with accurate subtitles in one workflow:
+
+```bash
+# 1. Generate video from text (saves audio and video)
+MSYS_NO_PATHCONV=1 python scripts/generate_from_text.py presentation.txt \
+  "/code/data/temp/20251113182348159.mp4" \
+  "/code/data/reference_audio.wav" \
+  "呃，嗯嗯嗯嗯嗯嗯懂啊，头部梳头术，没有爱是幸福是啊黄色。"
+
+# 2. Find the generated audio and video files
+AUDIO_FILE=$(ls -t D:/duix_avatar_data/face2face/temp/*.wav | head -1)
+VIDEO_FILE=$(ls -t D:/duix_avatar_data/face2face/temp/*-r.mp4 | head -1)
+
+# 3. Add subtitles using the generated audio for accurate timing
+python scripts/add_subtitles.py "$VIDEO_FILE" presentation.txt \
+  --audio "$AUDIO_FILE" \
+  --burn \
+  --font-size 28 \
+  --color yellow \
+  --burn-output "D:/duix_avatar_data/face2face/temp/final_video.mp4"
+
+# The final video with subtitles is now ready!
+```
+
+**Alternative - Generate SRT separately**:
+```bash
+# Generate just the SRT file (no burning)
+python scripts/add_subtitles.py "$VIDEO_FILE" presentation.txt \
+  --audio "$AUDIO_FILE" \
+  --output presentation.srt
+
+# Now you can use the SRT with any video player
+```
+
+---
+
+### Workflow 4: Separate TTS and Video Generation
 
 If you want more control, you can split the process:
 
@@ -432,6 +577,61 @@ cp D:/duix_avatar_data/face2face/temp/reference_audio.wav \
 ```bash
 MSYS_NO_PATHCONV=1 python scripts/generate_from_text.py ...
 MSYS_NO_PATHCONV=1 bash scripts/generate_video.sh ...
+```
+
+---
+
+### Problem: "Subtitle timing is inaccurate"
+
+**Symptoms**: Subtitles don't match the speech timing
+
+**Solutions**:
+1. Make sure you're providing the audio file with `--audio` parameter
+2. Install faster-whisper for accurate timing: `pip install faster-whisper`
+3. If using even distribution (no audio), timing will be approximate
+
+```bash
+# ✓ CORRECT - With audio for accurate timing
+python scripts/add_subtitles.py video.mp4 text.txt \
+  --audio audio.wav \
+  --burn
+
+# ✗ WRONG - No audio, timing will be evenly distributed
+python scripts/add_subtitles.py video.mp4 text.txt --burn
+```
+
+---
+
+### Problem: "FFmpeg not found"
+
+**Error**: `FFmpeg not found. Please install FFmpeg or add it to your PATH.`
+
+**Solutions**:
+1. FFmpeg should be auto-detected in `resources/ffmpeg/` folder
+2. Install FFmpeg system-wide: https://ffmpeg.org/download.html
+3. Add FFmpeg to your PATH environment variable
+
+```bash
+# Check if FFmpeg is accessible
+ffmpeg -version
+
+# If not, download and extract to resources folder
+# Or install system-wide for your OS
+```
+
+---
+
+### Problem: "ModuleNotFoundError: No module named 'faster_whisper'"
+
+**Solution**:
+```bash
+pip install faster-whisper
+```
+
+If the installation fails, you can still use the script with even distribution:
+```bash
+# This will work without faster-whisper (but timing will be less accurate)
+python scripts/add_subtitles.py video.mp4 text.txt --burn
 ```
 
 ---
