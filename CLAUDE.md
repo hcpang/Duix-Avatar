@@ -1,0 +1,350 @@
+# CLAUDE.md - Duix.Avatar Development Guide
+
+## Project Overview
+
+**Duix.Avatar** is an open-source AI avatar toolkit for offline video generation and digital human cloning. The project enables users to:
+- Clone appearance and voice to create realistic digital avatars
+- Generate videos driven by text or voice input
+- Add accurate word-level subtitles with Whisper ASR
+- Operate completely offline to protect privacy
+
+**Core Technologies:**
+- Voice cloning and TTS (Text-to-Speech)
+- Automatic Speech Recognition (Whisper ASR)
+- Computer vision for facial recognition and lip-sync
+- Docker-based microservices architecture
+
+**Official Website:** [www.duix.com](http://www.duix.com)
+
+---
+
+## Project Structure
+
+```
+Duix-Avatar/
+├── scripts/                    # Python utility scripts
+│   ├── add_subtitles.py       # Subtitle generation with Whisper ASR
+│   ├── subtitle_utils.py      # Shared subtitle utilities
+│   ├── test_subtitle_matching.py  # Unit tests for subtitle matching
+│   ├── generate_from_text.py  # End-to-end video generation from text
+│   └── test_api.py            # API testing utilities
+├── journals/                   # Development session documentation
+│   └── YYYY-MM-DD-{feature}.md
+├── documentation/              # Additional docs
+├── deploy/                     # Deployment configurations
+├── build/                      # Build artifacts
+├── JOURNALING-GUIDE.md        # Journal writing requirements
+└── API_USAGE.md               # API documentation
+```
+
+---
+
+## Key Files and Their Purposes
+
+### Python Scripts (`scripts/`)
+
+#### `add_subtitles.py`
+Generates accurate word-level subtitles using Whisper ASR.
+
+**Key Features:**
+- Word-level timestamp matching with user's original text
+- Multi-word fallback matching (tries up to 5 words)
+- Word-based position estimation to prevent matching common words too early
+- Subtitle overlap prevention (50ms gaps)
+- Fuzzy matching with Levenshtein distance
+
+**Usage:**
+```bash
+python scripts/add_subtitles.py VIDEO_PATH TEXT_FILE \
+  --audio AUDIO_PATH \
+  --burn \
+  --font-size 28 \
+  --color yellow
+```
+
+#### `subtitle_utils.py`
+Shared utilities for subtitle generation (created 2025-11-14).
+
+**Functions:**
+- `split_into_sentences(text)` - Sentence splitting by punctuation
+- `split_into_chunks(sentence, max_chars=60)` - Chunk splitting at natural breaks
+- `normalize_word(word)` - Word normalization for fuzzy matching
+- `edit_distance(s1, s2)` - Levenshtein distance calculation
+- `find_best_match(target, words, start_idx, window=20)` - Fuzzy word matching
+- `match_chunk_to_whisper(chunk, whisper_words, ...)` - Complete chunk matching with word-based position estimation
+
+**Critical Implementation Detail:**
+After matching a chunk with N words, the next search starts at `whisper_idx + N/2` to prevent matching common words too early (e.g., matching the wrong "to").
+
+#### `generate_from_text.py`
+End-to-end pipeline for generating avatar videos from text.
+
+**Workflow:**
+1. Synthesize audio from text using TTS API
+2. Submit video generation job
+3. Poll for completion
+4. Return video path
+
+**API Endpoints:**
+- TTS: `http://127.0.0.1:18180/v1/invoke`
+- Video Submit: `http://127.0.0.1:8383/easy/submit`
+- Video Query: `http://127.0.0.1:8383/easy/query`
+
+---
+
+## Development Conventions
+
+### File Organization
+
+1. **Test files belong in `scripts/`** alongside the code they test
+   - Example: `scripts/test_subtitle_matching.py`, `scripts/test_api.py`
+   - DO NOT place test files in the root directory
+
+2. **Shared utilities go in dedicated modules**
+   - Example: `scripts/subtitle_utils.py` eliminates code duplication
+   - Import from same directory when co-located
+
+3. **Data storage location**
+   - Default: `D:/duix_avatar_data/face2face/temp/`
+   - Videos, audio files, SRT subtitles stored here
+
+### Code Quality Standards
+
+1. **Zero Code Duplication**
+   - Proactively refactor shared logic into utility modules
+   - Check both production code AND test files for duplication
+   - Don't wait for user to ask - refactor immediately
+
+2. **Complete Refactoring**
+   - When refactoring, extract ALL duplicated logic, not just obvious parts
+   - Includes: text processing, data structures, utility functions
+   - Update imports in all affected files
+
+3. **UTF-8 Encoding**
+   All Python scripts must handle Windows encoding properly:
+   ```python
+   import sys
+   import io
+
+   if sys.platform == 'win32':
+       sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+       sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+   ```
+
+### Journaling Requirements
+
+Every development session MUST produce a journal in `journals/YYYY-MM-DD-{feature}.md`.
+
+**Required Sections:**
+1. **Session Metadata** - Date, model, files modified/created (with line numbers)
+2. **Problem Statement** - What needed to be solved and why
+3. **Solution Implementation** - Technical approach with code examples
+4. **Testing/Validation** - How solution was verified
+5. **Development Learnings** - ONLY mistakes corrected by user (with quotes)
+
+**See:** `JOURNALING-GUIDE.md` for complete requirements.
+
+**Critical Rule:** Development Learnings section documents ONLY mistakes that were corrected by the user during the session. Do NOT include general patterns, things that went well, or architectural insights.
+
+---
+
+## Docker Services
+
+The project uses three main Docker containers:
+
+1. **ASR Service** - `guiji2025/fun-asr`
+   - Automatic Speech Recognition
+   - Port: (check deployment config)
+
+2. **TTS Service** - `guiji2025/fish-speech-ziming`
+   - Text-to-Speech with voice cloning
+   - Port: 18180
+
+3. **Video Generation** - `guiji2025/duix.avatar`
+   - Avatar video synthesis
+   - Port: 8383
+
+---
+
+## Common Workflows
+
+### Generate Video from Text
+
+```bash
+python scripts/generate_from_text.py script.txt [video_template] [reference_audio] [reference_text]
+```
+
+### Add Subtitles to Video
+
+```bash
+python scripts/add_subtitles.py video.mp4 script.txt --audio audio.wav --burn --font-size 28 --color yellow
+```
+
+### Test Subtitle Matching
+
+```bash
+cd scripts
+python test_subtitle_matching.py
+```
+
+---
+
+## Critical Implementation Patterns
+
+### Subtitle Word Matching Algorithm
+
+**Problem:** Common words like "to" match the first occurrence instead of contextually correct one.
+
+**Solution:** Word-based position estimation
+```python
+# After matching chunk with N words, skip N/2 words for next search
+min_words_ahead = prev_chunk_word_count // 2
+min_search_idx = whisper_idx + min_words_ahead
+```
+
+**Multi-word Fallback:**
+If first word doesn't match, try up to 5 words. If word N matches, use timing of word N-1 as start time.
+
+### Subtitle Overlap Prevention
+
+**Problem:** End times calculated independently cause overlapping subtitles.
+
+**Solution:** Post-process to cap each segment 50ms before next segment starts
+```python
+for i in range(len(subtitle_segments) - 1):
+    next_start = subtitle_segments[i + 1]['start']
+    if subtitle_segments[i]['end'] > next_start:
+        subtitle_segments[i]['end'] = max(
+            subtitle_segments[i]['start'] + 0.1,
+            next_start - 0.05
+        )
+```
+
+---
+
+## Testing
+
+### Running Tests
+
+Tests are located in `scripts/` alongside the code they test.
+
+**Subtitle Matching Test:**
+- File: `scripts/test_subtitle_matching.py`
+- Validates 100% match rate (26/26 chunks in reference test)
+- Checks timing accuracy (e.g., "to predict" at 44.460s, not 41.600s)
+
+**Expected Output:**
+```
+Match rate: 100.0%
+Total chunks: 26
+Matched chunks: 26
+```
+
+---
+
+## Common Pitfalls
+
+### 1. Code Duplication
+**Mistake:** Leaving duplicated logic between production code and tests.
+**Fix:** Extract to shared utility modules immediately.
+
+### 2. Incomplete Refactoring
+**Mistake:** Only refactoring obvious logic, missing text processing/utilities.
+**Fix:** Search for ALL instances of duplication, not just main logic.
+
+### 3. Improper File Organization
+**Mistake:** Placing test files in root instead of scripts/.
+**Fix:** Check existing project structure (e.g., `scripts/test_api.py`) before creating files.
+
+### 4. Incorrect Word Matching
+**Mistake:** Using sequential search causes matching wrong occurrence of common words.
+**Fix:** Use word-based position estimation (skip N/2 words after matching N-word chunk).
+
+---
+
+## Git Commit Conventions
+
+**Commit Message Format:**
+```
+Brief imperative title
+
+- Bullet points describing changes
+- Reference file paths and line numbers for key changes
+- Include testing/validation results
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+
+**Example:**
+```
+Refactor subtitle matching with word-level position estimation
+
+- Created scripts/subtitle_utils.py with shared utilities
+- Implemented word-based position estimation (skip N/2 words)
+- Added subtitle overlap prevention (50ms gaps)
+- Achieved 100% match rate validation (26/26 chunks)
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+
+---
+
+## Hardware Requirements
+
+**Recommended:**
+- CPU: 13th Gen Intel Core i5-13400F or better
+- RAM: 32GB
+- GPU: NVIDIA RTX 4070 or better
+- Storage:
+  - C Drive: 100GB+ for Docker images
+  - D Drive: 30GB+ for data
+
+**Software:**
+- Windows 10 19042.1526 or higher / Ubuntu 22.04
+- Docker with WSL2 (Windows)
+- Node.js 18
+- NVIDIA drivers for GPU acceleration
+
+---
+
+## API Reference
+
+See `API_USAGE.md` for detailed API documentation.
+
+**Quick Reference:**
+- TTS: POST to `http://127.0.0.1:18180/v1/invoke`
+- Video Submit: POST to `http://127.0.0.1:8383/easy/submit`
+- Video Query: GET `http://127.0.0.1:8383/easy/query?task_id={id}`
+
+---
+
+## Support
+
+- GitHub Issues: Report bugs and feature requests
+- Official Website: [www.duix.com](http://www.duix.com)
+- License: See `LICENSE` file
+
+---
+
+## For Claude Sessions
+
+**Before Starting Work:**
+1. Read relevant journal entries in `journals/` to understand recent changes
+2. Check `JOURNALING-GUIDE.md` for documentation requirements
+3. Review this CLAUDE.md for project conventions
+
+**During Development:**
+1. Follow file organization conventions (tests in scripts/)
+2. Proactively refactor duplicate code - don't wait to be asked
+3. Use established patterns (UTF-8 encoding, word-based matching, etc.)
+4. Reference specific file paths and line numbers in communications
+
+**After Completion:**
+1. Write journal in `journals/YYYY-MM-DD-{feature}.md`
+2. Include only user-corrected mistakes in Development Learnings
+3. Create git commit with proper format
+4. Update this CLAUDE.md if new conventions were established

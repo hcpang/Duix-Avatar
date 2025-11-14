@@ -11,6 +11,10 @@ import subprocess
 import argparse
 from pathlib import Path
 
+# Import shared subtitle utilities
+from subtitle_utils import (normalize_word, edit_distance, find_best_match,
+                             match_chunk_to_whisper, split_into_sentences, split_into_chunks)
+
 # Set UTF-8 encoding for stdout on Windows
 if sys.platform == 'win32':
     import io
@@ -176,7 +180,7 @@ def get_timestamps_from_local_asr(audio_path):
 
 
 def get_word_timestamps(audio_path, text):
-    """Get word-level timestamps using faster-whisper ASR"""
+    """Get timing from Whisper and map user's original text with accurate start times"""
     if not WHISPER_AVAILABLE:
         return None
 
@@ -185,25 +189,33 @@ def get_word_timestamps(audio_path, text):
         # Use tiny model for speed (can use 'base' or 'small' for better accuracy)
         model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
-        # Transcribe with word timestamps
+        # Transcribe to get word-level timestamps
         segments, info = model.transcribe(
             audio_path,
             word_timestamps=True,
             language="en"
         )
 
-        # Extract segments with proper timing (better than individual words)
-        subtitle_segments = []
+        # Extract word-level timestamps
+        word_timings = []
         for segment in segments:
-            subtitle_segments.append({
-                'text': segment.text.strip(),
-                'start': segment.start,
-                'end': segment.end
-            })
+            if hasattr(segment, 'words') and segment.words:
+                for word in segment.words:
+                    word_timings.append({
+                        'word': word.word.strip(),
+                        'start': word.start,
+                        'end': word.end
+                    })
 
-        if subtitle_segments:
-            print(f"  ✓ Got {len(subtitle_segments)} timed segments from Whisper")
-            return subtitle_segments
+        if word_timings:
+            print(f"  ✓ Got {len(word_timings)} word timestamps from Whisper")
+            # Map user's original text to these word timings
+            print(f"  ✓ Mapping your original text with accurate start times...")
+            aligned_segments = map_text_to_word_timings(text, word_timings, max_chars=60)
+            if aligned_segments:
+                print(f"  ✓ Created {len(aligned_segments)} subtitle segments with accurate timing")
+                return aligned_segments
+
         return None
 
     except Exception as e:
@@ -211,58 +223,246 @@ def get_word_timestamps(audio_path, text):
         return None
 
 
-def align_text_to_timestamps(text, word_timings, max_chars=60):
-    """Align user's text to ASR word timestamps"""
-    # Split user text into words
-    user_words = re.findall(r'\S+', text.lower())
-    asr_words = [w['word'].lower() for w in word_timings]
+def map_text_to_word_timings(text, word_timings, max_chars=60):
+    """Map user's original text to Whisper word timings with accurate start times"""
 
-    # Simple alignment: match user words to ASR words
+    # Split text into sentences
+    full_sentences = split_into_sentences(text)
+    if not full_sentences:
+        return None
+
+    # Normalize all Whisper words for matching
+    whisper_words_normalized = [normalize_word(w['word']) for w in word_timings]
+
+    # Calculate total duration
+    total_duration = word_timings[-1]['end'] - word_timings[0]['start']
+    total_chars = sum(len(s) for s in full_sentences)
+
+    subtitle_segments = []
+    whisper_idx = 0
+    chars_processed = 0
+    prev_chunk_word_count = 0  # Track previous chunk's word count for position estimation
+
+    for sentence in full_sentences:
+        # Split sentence into chunks if it exceeds max_chars
+        chunks = split_into_chunks(sentence, max_chars)
+
+        # For each chunk, find accurate start time
+        for chunk in chunks:
+            # Try to match chunk to Whisper words
+            chunk_start, whisper_idx, match_found, current_chunk_word_count = match_chunk_to_whisper(
+                chunk, word_timings, whisper_words_normalized, whisper_idx, prev_chunk_word_count
+            )
+
+            # Update prev_chunk_word_count for next iteration
+            prev_chunk_word_count = current_chunk_word_count
+
+            if not match_found:
+                # No match found for any of the first 5 words, use proportional positioning
+                # Calculate where we are in the text (percentage)
+                progress = chars_processed / total_chars if total_chars > 0 else 0
+                # Estimate position in audio based on text progress
+                estimated_time = word_timings[0]['start'] + (progress * total_duration)
+
+                # Find closest Whisper word to this estimated time
+                closest_idx = whisper_idx
+                min_time_diff = abs(word_timings[closest_idx]['start'] - estimated_time)
+
+                for idx in range(whisper_idx, len(word_timings)):
+                    time_diff = abs(word_timings[idx]['start'] - estimated_time)
+                    if time_diff < min_time_diff:
+                        min_time_diff = time_diff
+                        closest_idx = idx
+                    elif time_diff > min_time_diff:
+                        # Times are getting further, stop searching
+                        break
+
+                chunk_start = word_timings[closest_idx]['start']
+                whisper_idx = closest_idx + 1
+
+            # Calculate end time based on character proportion
+            chunk_duration = (len(chunk) / total_chars) * total_duration
+            chunk_end = chunk_start + chunk_duration
+
+            # Make sure end time doesn't exceed total duration
+            if chunk_end > word_timings[-1]['end']:
+                chunk_end = word_timings[-1]['end']
+
+            subtitle_segments.append({
+                'text': chunk,
+                'start': chunk_start,
+                'end': chunk_end
+            })
+
+            chars_processed += len(chunk)
+
+    # Fix overlapping segments - ensure each segment ends before the next starts
+    for i in range(len(subtitle_segments) - 1):
+        next_start = subtitle_segments[i + 1]['start']
+        if subtitle_segments[i]['end'] > next_start:
+            # Cap the end time to just before the next segment starts (with 50ms gap)
+            subtitle_segments[i]['end'] = max(subtitle_segments[i]['start'] + 0.1, next_start - 0.05)
+
+    return subtitle_segments if subtitle_segments else None
+
+
+def map_text_to_boundaries(text, segment_boundaries, max_chars=60):
+    """Map user's original text to Whisper timing boundaries proportionally"""
+
+    # Split text into sentences
+    full_sentences = split_into_sentences(text)
+    if not full_sentences:
+        return None
+
+    # Calculate total duration
+    total_duration = segment_boundaries[-1]['end'] - segment_boundaries[0]['start']
+
+    # Assign timing to each sentence based on character proportion
+    total_chars = sum(len(s) for s in full_sentences)
+    current_time = segment_boundaries[0]['start']
+
+    subtitle_segments = []
+    for sentence in full_sentences:
+        # Calculate duration for this sentence based on character proportion
+        sentence_chars = len(sentence)
+        sentence_duration = (sentence_chars / total_chars) * total_duration
+
+        # Split sentence into chunks if it exceeds max_chars
+        if len(sentence) <= max_chars:
+            subtitle_segments.append({
+                'text': sentence,
+                'start': current_time,
+                'end': current_time + sentence_duration
+            })
+            current_time += sentence_duration
+        else:
+            # Split long sentence at natural break points
+            words = sentence.split()
+            chunks = []
+            current_chunk = []
+
+            for word in words:
+                test_chunk = ' '.join(current_chunk + [word])
+                if len(test_chunk) > max_chars and current_chunk:
+                    chunks.append(' '.join(current_chunk))
+                    current_chunk = [word]
+                else:
+                    current_chunk.append(word)
+
+            if current_chunk:
+                chunks.append(' '.join(current_chunk))
+
+            # Distribute duration across chunks
+            chunk_duration = sentence_duration / len(chunks)
+            for chunk in chunks:
+                subtitle_segments.append({
+                    'text': chunk,
+                    'start': current_time,
+                    'end': current_time + chunk_duration
+                })
+                current_time += chunk_duration
+
+    return subtitle_segments if subtitle_segments else None
+
+
+def align_text_to_timestamps(text, word_timings, max_chars=60):
+    """Align user's original text to ASR word timestamps preserving punctuation"""
+
+    def normalize_word(word):
+        """Remove punctuation and lowercase for comparison"""
+        return re.sub(r'[^\w\s]', '', word.lower())
+
+    # Extract words from original text (keeping punctuation)
+    user_words_with_punct = re.findall(r'\S+', text)
+    user_words_normalized = [normalize_word(w) for w in user_words_with_punct]
+
+    # Normalize ASR words for comparison
+    asr_words_normalized = [normalize_word(w['word']) for w in word_timings]
+
+    # Align words
     aligned_chunks = []
-    current_chunk = []
-    current_chunk_words = []
+    current_words_original = []
     current_start = None
+    current_end = None
+    over_max = False  # Track if we've exceeded max length
 
     asr_idx = 0
-    for user_word in user_words:
+    for user_idx, user_word_norm in enumerate(user_words_normalized):
+        if not user_word_norm:  # Skip empty words
+            continue
+
         # Find matching ASR word
-        while asr_idx < len(asr_words):
-            # Check if words match (allow partial matches for punctuation)
-            if user_word in asr_words[asr_idx] or asr_words[asr_idx] in user_word:
+        matched = False
+        while asr_idx < len(asr_words_normalized):
+            asr_word_norm = asr_words_normalized[asr_idx]
+
+            # Check if words match (fuzzy matching for small differences)
+            if user_word_norm == asr_word_norm or \
+               user_word_norm in asr_word_norm or \
+               asr_word_norm in user_word_norm:
+
                 timing = word_timings[asr_idx]
 
                 if current_start is None:
                     current_start = timing['start']
+                current_end = timing['end']
 
-                current_chunk_words.append(user_word)
-                current_chunk.append(timing)
+                # Add original word with punctuation
+                current_words_original.append(user_words_with_punct[user_idx])
 
                 # Check if we should break into new subtitle
-                chunk_text = ' '.join(current_chunk_words)
-                if len(chunk_text) > max_chars or user_word.endswith(('.', '!', '?')):
-                    if current_chunk:
-                        aligned_chunks.append({
-                            'text': chunk_text,
-                            'start': current_start,
-                            'end': timing['end']
-                        })
-                        current_chunk = []
-                        current_chunk_words = []
-                        current_start = None
+                chunk_text = ' '.join(current_words_original)
+                user_word_original = user_words_with_punct[user_idx]
+
+                # Update over_max flag
+                if len(chunk_text) > max_chars:
+                    over_max = True
+
+                # Determine if this is a natural break point
+                is_sentence_end = user_word_original.rstrip().endswith(('.', '!', '?', '。', '！', '？'))
+                is_pause_point = user_word_original.rstrip().endswith((',', ';', ':', '.', '!', '?', '。', '！', '？'))
+
+                # Break logic:
+                # 1. Always break at sentence end
+                # 2. If we've exceeded max, break at next pause point (comma, period, etc.)
+                # 3. If way over max (1.8x), force break
+                should_break = (
+                    is_sentence_end or
+                    (over_max and is_pause_point) or
+                    len(chunk_text) > max_chars * 1.8
+                )
+
+                if should_break and current_words_original:
+                    aligned_chunks.append({
+                        'text': chunk_text,
+                        'start': current_start,
+                        'end': current_end
+                    })
+                    current_words_original = []
+                    current_start = None
+                    current_end = None
+                    over_max = False  # Reset flag
 
                 asr_idx += 1
+                matched = True
                 break
+
             asr_idx += 1
 
+        # If no match found for this word, skip it (might be filler words or ASR missed it)
+        if not matched and current_words_original:
+            # Still add the word to current chunk if we have context
+            current_words_original.append(user_words_with_punct[user_idx])
+
     # Add remaining chunk
-    if current_chunk:
+    if current_words_original and current_start is not None:
         aligned_chunks.append({
-            'text': ' '.join(current_chunk_words),
+            'text': ' '.join(current_words_original),
             'start': current_start,
-            'end': current_chunk[-1]['end']
+            'end': current_end if current_end else current_start + 2.0
         })
 
-    return aligned_chunks
+    return aligned_chunks if aligned_chunks else None
 
 
 def format_timestamp(seconds):
