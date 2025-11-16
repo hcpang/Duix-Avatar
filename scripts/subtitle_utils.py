@@ -81,91 +81,140 @@ def edit_distance(s1, s2):
     return previous_row[-1]
 
 
-def find_best_match(target_word, whisper_words_norm, start_idx, search_window=20):
-    """Find best matching word within search window using fuzzy matching
+
+
+def create_global_alignment(text, whisper_words):
+    """Create global alignment between all user text words and Whisper words
+
+    This does ONE Needleman-Wunsch alignment of the entire text, creating a mapping
+    from user word positions to Whisper word positions. This is more robust than
+    sequential chunk matching because errors don't propagate.
 
     Args:
-        target_word: Normalized word from user's text to match
-        whisper_words_norm: List of normalized Whisper words
-        start_idx: Index to start searching from
-        search_window: How many words ahead to search
-
-    Returns:
-        Tuple of (best_match_index, edit_distance) or (None, inf) if no match
-    """
-    if not target_word:
-        return None, float('inf')
-
-    end_idx = min(start_idx + search_window, len(whisper_words_norm))
-    best_idx = None
-    best_distance = float('inf')
-
-    for idx in range(start_idx, end_idx):
-        whisper_word = whisper_words_norm[idx]
-
-        # Try exact match first
-        if whisper_word == target_word:
-            return idx, 0
-
-        # Calculate edit distance for fuzzy match
-        dist = edit_distance(target_word, whisper_word)
-
-        # Only consider as match if distance is small relative to word length
-        max_dist = max(2, len(target_word) // 3)  # Allow up to 1/3 of chars different
-        if dist < best_distance and dist <= max_dist:
-            best_distance = dist
-            best_idx = idx
-
-    return best_idx, best_distance
-
-
-def match_chunk_to_whisper(chunk, whisper_words, whisper_words_normalized, whisper_idx, prev_chunk_word_count=0):
-    """Match a text chunk to Whisper word timings
-
-    Args:
-        chunk: Text chunk to match
+        text: Full user text to align
         whisper_words: List of word timing dicts with 'word', 'start', 'end'
-        whisper_words_normalized: List of normalized Whisper words
-        whisper_idx: Current position in whisper_words
-        prev_chunk_word_count: Number of words in the previous chunk (for position estimation)
 
     Returns:
-        Tuple of (chunk_start_time, new_whisper_idx, match_found, current_chunk_word_count) or (None, whisper_idx, False, 0)
+        List where alignment[i] = whisper_index for user_word[i], or None if no match
     """
-    chunk_words = chunk.split()
-    if not chunk_words:
-        return None, whisper_idx, False, 0
+    user_words = text.split()
+    if not user_words or not whisper_words:
+        return []
 
-    # Calculate minimum search position based on PREVIOUS chunk's word count
-    # If we just matched a chunk with N words, the next chunk should be at least N/2 words ahead
-    # This prevents matching common words too early (like matching the wrong "to")
-    min_words_ahead = prev_chunk_word_count // 2
-    min_search_idx = whisper_idx + min_words_ahead
+    user_words_norm = [normalize_word(w) for w in user_words]
+    whisper_words_norm = [normalize_word(w['word']) for w in whisper_words]
 
-    # Try to match first word, then fallback to next words (up to 5)
-    for word_offset in range(min(5, len(chunk_words))):
-        # Handle hyphenated words by taking first part
-        target_word = chunk_words[word_offset].split('-')[0]
-        target_word_normalized = normalize_word(target_word)
+    n_user = len(user_words_norm)
+    n_whisper = len(whisper_words_norm)
 
-        # Try fuzzy matching with search window, starting from estimated position
-        match_idx, distance = find_best_match(
-            target_word_normalized,
-            whisper_words_normalized,
-            min_search_idx,
-            search_window=20
-        )
+    # Scoring parameters
+    MATCH_SCORE = 10
+    MISMATCH_PENALTY = -5
+    GAP_PENALTY = -3
 
-        if match_idx is not None and distance <= 2:
-            # Found a match!
-            if word_offset > 0 and match_idx > 0:
-                # We matched 2nd+ word, use the word before it as start time
-                chunk_start = whisper_words[match_idx - 1]['start']
+    # Initialize DP matrix
+    score_matrix = [[0] * (n_whisper + 1) for _ in range(n_user + 1)]
+
+    # Initialize first row and column (gaps)
+    for i in range(1, n_user + 1):
+        score_matrix[i][0] = i * GAP_PENALTY
+    for j in range(1, n_whisper + 1):
+        score_matrix[0][j] = j * GAP_PENALTY
+
+    # Fill DP matrix
+    for i in range(1, n_user + 1):
+        user_word = user_words_norm[i - 1]
+        for j in range(1, n_whisper + 1):
+            whisper_word = whisper_words_norm[j - 1]
+
+            # Calculate match/mismatch score
+            if user_word == whisper_word:
+                match_score = MATCH_SCORE
             else:
-                # We matched the first word, use it directly
-                chunk_start = whisper_words[match_idx]['start']
+                # Use edit distance for partial matches
+                dist = edit_distance(user_word, whisper_word)
+                max_len = max(len(user_word), len(whisper_word))
+                if max_len > 0 and dist <= max_len * 0.3:
+                    match_score = MATCH_SCORE - dist
+                else:
+                    match_score = MISMATCH_PENALTY
 
-            new_whisper_idx = match_idx + 1
-            return chunk_start, new_whisper_idx, True, len(chunk_words)
+            diagonal = score_matrix[i - 1][j - 1] + match_score
+            left = score_matrix[i][j - 1] + GAP_PENALTY  # Gap in user (skip whisper word)
+            up = score_matrix[i - 1][j] + GAP_PENALTY  # Gap in whisper (skip user word)
 
-    return None, whisper_idx, False, len(chunk_words)
+            score_matrix[i][j] = max(diagonal, left, up)
+
+    # Backtrace to build alignment mapping
+    alignment = [None] * n_user  # alignment[i] = whisper_index for user_word[i]
+    i, j = n_user, n_whisper
+
+    while i > 0 and j > 0:
+        current_score = score_matrix[i][j]
+        diagonal_score = score_matrix[i - 1][j - 1]
+        left_score = score_matrix[i][j - 1]
+        up_score = score_matrix[i - 1][j]
+
+        user_word = user_words_norm[i - 1]
+        whisper_word = whisper_words_norm[j - 1]
+
+        # Calculate expected match score
+        if user_word == whisper_word:
+            expected_match = MATCH_SCORE
+        else:
+            dist = edit_distance(user_word, whisper_word)
+            max_len = max(len(user_word), len(whisper_word))
+            if max_len > 0 and dist <= max_len * 0.3:
+                expected_match = MATCH_SCORE - dist
+            else:
+                expected_match = MISMATCH_PENALTY
+
+        if current_score == diagonal_score + expected_match:
+            # Match/mismatch - record mapping
+            alignment[i - 1] = j - 1
+            i -= 1
+            j -= 1
+        elif current_score == left_score + GAP_PENALTY:
+            # Gap in user text (skip whisper word)
+            j -= 1
+        else:
+            # Gap in whisper (skip user word, leave as None)
+            i -= 1
+
+    return alignment
+
+
+def get_chunk_timing_from_alignment(chunk_start_word_idx, chunk_word_count, alignment, whisper_words):
+    """Get timing for a chunk using pre-computed global alignment
+
+    Args:
+        chunk_start_word_idx: Starting word index of chunk in original text
+        chunk_word_count: Number of words in the chunk
+        alignment: Global alignment list from create_global_alignment()
+        whisper_words: List of word timing dicts
+
+    Returns:
+        Tuple of (start_time, end_time) or (None, None) if no alignment found
+    """
+    if not alignment or chunk_word_count == 0:
+        return None, None
+
+    # Find first and last aligned Whisper words for this chunk
+    whisper_indices = []
+    for i in range(chunk_start_word_idx, min(chunk_start_word_idx + chunk_word_count, len(alignment))):
+        if alignment[i] is not None:
+            whisper_indices.append(alignment[i])
+
+    if not whisper_indices:
+        return None, None
+
+    # Get timing from first and last aligned Whisper words
+    first_whisper_idx = min(whisper_indices)
+    last_whisper_idx = max(whisper_indices)
+
+    start_time = whisper_words[first_whisper_idx]['start']
+    end_time = whisper_words[last_whisper_idx]['end']
+
+    return start_time, end_time
+
+

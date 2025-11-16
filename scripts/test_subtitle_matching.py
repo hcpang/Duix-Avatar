@@ -6,6 +6,12 @@ Tests the alignment between original text and Whisper word timings
 
 import re
 import sys
+import io
+
+# Set UTF-8 encoding for stdout on Windows
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 try:
     from faster_whisper import WhisperModel
@@ -16,8 +22,8 @@ except ImportError:
     sys.exit(1)
 
 # Import shared utilities (same directory)
-from subtitle_utils import (normalize_word, edit_distance, find_best_match,
-                             match_chunk_to_whisper, split_into_sentences, split_into_chunks)
+from subtitle_utils import (normalize_word, split_into_sentences, split_into_chunks,
+                             create_global_alignment, get_chunk_timing_from_alignment)
 
 def test_matching(text_file, audio_file):
     """Test the text matching against Whisper output"""
@@ -58,22 +64,32 @@ def test_matching(text_file, audio_file):
     full_sentences = split_into_sentences(original_text)
     print(f"\nSplit into {len(full_sentences)} sentences")
 
-    # Now test matching for each sentence
+    # Now test NEW global alignment approach
     print("\n" + "=" * 70)
-    print("MATCHING RESULTS")
+    print("GLOBAL ALIGNMENT APPROACH")
     print("=" * 70)
 
-    whisper_words_normalized = [normalize_word(w['word']) for w in whisper_words]
-    whisper_idx = 0
+    # Step 1: Create global alignment once for entire text
+    print("\nStep 1: Creating global word-to-word alignment...")
+    alignment = create_global_alignment(original_text, whisper_words)
+
+    if not alignment:
+        print("ERROR: Global alignment failed!")
+        return
+
+    # Count alignment statistics
+    aligned_count = sum(1 for a in alignment if a is not None)
+    total_words = len(alignment)
+    print(f"✓ Aligned {aligned_count}/{total_words} words ({aligned_count/total_words*100:.1f}%)")
+
+    # Step 2: Test matching for each chunk using global alignment
+    print("\n" + "=" * 70)
+    print("CHUNK MATCHING RESULTS")
+    print("=" * 70)
 
     total_chunks = 0
     matched_chunks = 0
-
-    # Track character progress for temporal positioning
-    chars_processed = 0
-    total_chars = len(original_text)
-    total_duration = whisper_words[-1]['end'] if whisper_words else 0
-    prev_chunk_word_count = 0  # Track previous chunk's word count for position estimation
+    current_word_idx = 0  # Track position in original text word array
 
     for sent_num, sentence in enumerate(full_sentences, 1):
         print(f"\n--- Sentence {sent_num} ---")
@@ -84,36 +100,60 @@ def test_matching(text_file, audio_file):
 
         for chunk_num, chunk in enumerate(chunks, 1):
             total_chunks += 1
+            chunk_word_count = len(chunk.split())
 
-            # Try to match chunk to Whisper words using shared function
-            chunk_start_time, new_whisper_idx, match_found, current_chunk_word_count = match_chunk_to_whisper(
-                chunk, whisper_words, whisper_words_normalized, whisper_idx, prev_chunk_word_count
+            # Step 3: Get timing from global alignment
+            start_time, end_time = get_chunk_timing_from_alignment(
+                current_word_idx,
+                chunk_word_count,
+                alignment,
+                whisper_words
             )
 
-            # Update prev_chunk_word_count for next iteration
-            prev_chunk_word_count = current_chunk_word_count
+            match_found = (start_time is not None and end_time is not None)
 
             if match_found:
                 matched_chunks += 1
-                # Update whisper_idx for next iteration
-                match_idx = new_whisper_idx - 1  # The matched word index
-                whisper_idx = new_whisper_idx
-
-            # Update character progress
-            chars_processed += len(chunk) + 1  # +1 for space
 
             status = "[MATCH]" if match_found else "[NO MATCH]"
             print(f"\n  Chunk {chunk_num}: {chunk[:50]}{'...' if len(chunk) > 50 else ''}")
 
             if match_found:
-                print(f"  {status} at index {match_idx}")
-                print(f"    Whisper word: '{whisper_words[match_idx]['word']}'")
-                print(f"    Start time: {chunk_start_time:.3f}s")
+                # Find which Whisper words were aligned for this chunk
+                whisper_indices = []
+                for i in range(current_word_idx, min(current_word_idx + chunk_word_count, len(alignment))):
+                    if alignment[i] is not None:
+                        whisper_indices.append(alignment[i])
+
+                if whisper_indices:
+                    match_start = min(whisper_indices)
+                    match_end = max(whisper_indices) + 1
+                    matched_whisper_words = whisper_words[match_start:match_end]
+
+                    print(f"  {status} at Whisper indices [{match_start}:{match_end}]")
+                    print(f"    Start time: {start_time:.3f}s")
+                    print(f"    End time: {end_time:.3f}s")
+                    print(f"    Duration: {end_time - start_time:.3f}s")
+                    print(f"    Chunk words ({len(chunk.split())}): {chunk.split()}")
+                    print(f"    Whisper words ({len(matched_whisper_words)}): {[w['word'] for w in matched_whisper_words]}")
+
+                    # Show word-by-word alignment from global mapping
+                    print(f"    Word alignment (from global mapping):")
+                    chunk_words_list = chunk.split()
+                    for i, word in enumerate(chunk_words_list):
+                        word_idx = current_word_idx + i
+                        if word_idx < len(alignment) and alignment[word_idx] is not None:
+                            whisper_idx = alignment[word_idx]
+                            whisper_word = whisper_words[whisper_idx]['word']
+                            match_symbol = "[OK]" if normalize_word(word) == normalize_word(whisper_word) else "[~]"
+                            print(f"      {word:<20} -> {whisper_word:<20} {match_symbol}")
+                        else:
+                            print(f"      {word:<20} -> [none]               [GAP]")
             else:
-                chunk_words = chunk.split()
-                first_word = chunk_words[0] if chunk_words else ""
-                print(f"  First word: '{first_word}'")
                 print(f"  {status}")
+
+            # Move word index forward
+            current_word_idx += chunk_word_count
 
     # Summary
     print("\n" + "=" * 70)
@@ -131,7 +171,12 @@ def test_matching(text_file, audio_file):
         print("  - Handling contractions and filler words")
 
 if __name__ == "__main__":
-    text_file = "deep_dive_trading.txt"
-    audio_file = "D:/duix_avatar_data/face2face/temp/aeef7485-34c2-422c-9f17-aeeac99bc830.wav"
+    # Default: deep_dive_trading.txt
+    # text_file = "deep_dive_trading.txt"
+    # audio_file = "D:/duix_avatar_data/face2face/temp/aeef7485-34c2-422c-9f17-aeeac99bc830.wav"
+
+    # Test on segment 7
+    text_file = "segment_7_text.txt"
+    audio_file = "D:/duix_avatar_data/face2face/temp/bd427605-4529-4f35-b6db-8f0fc2a18cab.wav"
 
     test_matching(text_file, audio_file)

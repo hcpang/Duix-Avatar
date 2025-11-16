@@ -12,8 +12,8 @@ import argparse
 from pathlib import Path
 
 # Import shared subtitle utilities
-from subtitle_utils import (normalize_word, edit_distance, find_best_match,
-                             match_chunk_to_whisper, split_into_sentences, split_into_chunks)
+from subtitle_utils import (normalize_word, split_into_sentences, split_into_chunks,
+                             create_global_alignment, get_chunk_timing_from_alignment)
 
 # Set UTF-8 encoding for stdout on Windows
 if sys.platform == 'win32':
@@ -48,9 +48,14 @@ def get_audio_duration(audio_path):
     except Exception as e:
         print(f"Warning: Could not read audio duration from WAV file: {e}")
         # Try using ffprobe as fallback
+        ffprobe_cmd = find_ffmpeg_tool('ffprobe')
+        if not ffprobe_cmd:
+            print("Error: ffprobe not found")
+            return None
+
         try:
             result = subprocess.run(
-                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                [ffprobe_cmd, '-v', 'error', '-show_entries', 'format=duration',
                  '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
                 capture_output=True,
                 text=True
@@ -224,79 +229,79 @@ def get_word_timestamps(audio_path, text):
 
 
 def map_text_to_word_timings(text, word_timings, max_chars=60):
-    """Map user's original text to Whisper word timings with accurate start times"""
+    """Map user's original text to Whisper word timings using global alignment
 
-    # Split text into sentences
+    This does ONE global alignment of the entire text, then looks up chunk timings
+    from the pre-computed mapping. This eliminates error propagation from sequential
+    matching and avoids indexing edge cases.
+    """
+
+    # Step 1: Create global alignment between user text and Whisper words
+    print("  Creating global word-to-word alignment...")
+    alignment = create_global_alignment(text, word_timings)
+
+    if not alignment:
+        print("  Warning: Global alignment failed, falling back to proportional timing")
+        return None
+
+    # Count how many words were successfully aligned
+    aligned_count = sum(1 for a in alignment if a is not None)
+    total_words = len(alignment)
+    print(f"  ✓ Aligned {aligned_count}/{total_words} words ({aligned_count/total_words*100:.1f}%)")
+
+    # Step 2: Split text into sentences and chunks, tracking word indices
     full_sentences = split_into_sentences(text)
     if not full_sentences:
         return None
 
-    # Normalize all Whisper words for matching
-    whisper_words_normalized = [normalize_word(w['word']) for w in word_timings]
-
-    # Calculate total duration
-    total_duration = word_timings[-1]['end'] - word_timings[0]['start']
-    total_chars = sum(len(s) for s in full_sentences)
-
     subtitle_segments = []
-    whisper_idx = 0
-    chars_processed = 0
-    prev_chunk_word_count = 0  # Track previous chunk's word count for position estimation
+    current_word_idx = 0  # Track position in the original text word array
 
     for sentence in full_sentences:
         # Split sentence into chunks if it exceeds max_chars
         chunks = split_into_chunks(sentence, max_chars)
 
-        # For each chunk, find accurate start time
         for chunk in chunks:
-            # Try to match chunk to Whisper words
-            chunk_start, whisper_idx, match_found, current_chunk_word_count = match_chunk_to_whisper(
-                chunk, word_timings, whisper_words_normalized, whisper_idx, prev_chunk_word_count
+            chunk_word_count = len(chunk.split())
+
+            # Step 3: Get timing from global alignment
+            start_time, end_time = get_chunk_timing_from_alignment(
+                current_word_idx,
+                chunk_word_count,
+                alignment,
+                word_timings
             )
 
-            # Update prev_chunk_word_count for next iteration
-            prev_chunk_word_count = current_chunk_word_count
+            if start_time is not None and end_time is not None:
+                subtitle_segments.append({
+                    'text': chunk,
+                    'start': start_time,
+                    'end': end_time
+                })
+            else:
+                # Fallback: use previous segment's end time if available
+                if subtitle_segments:
+                    prev_end = subtitle_segments[-1]['end']
+                    # Estimate duration based on character count
+                    estimated_duration = len(chunk) * 0.05  # ~50ms per character
+                    subtitle_segments.append({
+                        'text': chunk,
+                        'start': prev_end,
+                        'end': prev_end + estimated_duration
+                    })
+                else:
+                    # First segment and no alignment - use start of audio
+                    estimated_duration = len(chunk) * 0.05
+                    subtitle_segments.append({
+                        'text': chunk,
+                        'start': word_timings[0]['start'],
+                        'end': word_timings[0]['start'] + estimated_duration
+                    })
 
-            if not match_found:
-                # No match found for any of the first 5 words, use proportional positioning
-                # Calculate where we are in the text (percentage)
-                progress = chars_processed / total_chars if total_chars > 0 else 0
-                # Estimate position in audio based on text progress
-                estimated_time = word_timings[0]['start'] + (progress * total_duration)
+            # Move word index forward
+            current_word_idx += chunk_word_count
 
-                # Find closest Whisper word to this estimated time
-                closest_idx = whisper_idx
-                min_time_diff = abs(word_timings[closest_idx]['start'] - estimated_time)
-
-                for idx in range(whisper_idx, len(word_timings)):
-                    time_diff = abs(word_timings[idx]['start'] - estimated_time)
-                    if time_diff < min_time_diff:
-                        min_time_diff = time_diff
-                        closest_idx = idx
-                    elif time_diff > min_time_diff:
-                        # Times are getting further, stop searching
-                        break
-
-                chunk_start = word_timings[closest_idx]['start']
-                whisper_idx = closest_idx + 1
-
-            # Calculate end time based on character proportion
-            chunk_duration = (len(chunk) / total_chars) * total_duration
-            chunk_end = chunk_start + chunk_duration
-
-            # Make sure end time doesn't exceed total duration
-            if chunk_end > word_timings[-1]['end']:
-                chunk_end = word_timings[-1]['end']
-
-            subtitle_segments.append({
-                'text': chunk,
-                'start': chunk_start,
-                'end': chunk_end
-            })
-
-            chars_processed += len(chunk)
-
-    # Fix overlapping segments - ensure each segment ends before the next starts
+    # Step 4: Fix overlapping segments - ensure each segment ends before the next starts
     for i in range(len(subtitle_segments) - 1):
         next_start = subtitle_segments[i + 1]['start']
         if subtitle_segments[i]['end'] > next_start:
@@ -524,28 +529,40 @@ def generate_srt(text, duration, max_chars=60, word_timings=None):
     return '\n'.join(srt_content)
 
 
-def find_ffmpeg():
-    """Find ffmpeg executable, checking PATH and resources folder"""
+def find_ffmpeg_tool(tool_name):
+    """Find FFmpeg tool executable, checking PATH and resources folder
+
+    Args:
+        tool_name: Name of the tool (e.g., 'ffmpeg', 'ffprobe', 'ffplay')
+
+    Returns:
+        Path to executable or None if not found
+    """
     # Try system PATH first
     try:
-        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+        result = subprocess.run([tool_name, '-version'], capture_output=True, text=True)
         if result.returncode == 0:
-            return 'ffmpeg'
+            return tool_name
     except FileNotFoundError:
         pass
 
     # Check resources folder
     script_dir = Path(__file__).parent.parent
-    ffmpeg_paths = [
-        script_dir / 'resources' / 'ffmpeg' / 'win-amd64' / 'bin' / 'ffmpeg.exe',
-        script_dir / 'resources' / 'ffmpeg' / 'linux-x64' / 'bin' / 'ffmpeg',
+    tool_paths = [
+        script_dir / 'resources' / 'ffmpeg' / 'win-amd64' / 'bin' / f'{tool_name}.exe',
+        script_dir / 'resources' / 'ffmpeg' / 'linux-x64' / 'bin' / tool_name,
     ]
 
-    for ffmpeg_path in ffmpeg_paths:
-        if ffmpeg_path.exists():
-            return str(ffmpeg_path)
+    for tool_path in tool_paths:
+        if tool_path.exists():
+            return str(tool_path)
 
     return None
+
+
+def find_ffmpeg():
+    """Find ffmpeg executable, checking PATH and resources folder"""
+    return find_ffmpeg_tool('ffmpeg')
 
 
 def burn_subtitles(video_path, srt_path, output_path, font_size=24, font_color="white"):

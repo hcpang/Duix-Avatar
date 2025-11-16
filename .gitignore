@@ -5,3 +5,12 @@ out
 .DS_Store
 *.log*
 .claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Test and input files
+inputs/

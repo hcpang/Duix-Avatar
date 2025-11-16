@@ -70,7 +70,7 @@ def synthesize_audio(text, reference_audio=None, reference_text=None):
         print(f"  Using voice cloning with reference audio")
 
     try:
-        response = requests.post(TTS_URL, json=tts_params, timeout=120)
+        response = requests.post(TTS_URL, json=tts_params, timeout=600)
 
         # The response should be the audio file
         if response.status_code == 200:
