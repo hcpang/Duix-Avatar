@@ -90,6 +90,40 @@ End-to-end pipeline for generating avatar videos from text.
 - Video Submit: `http://127.0.0.1:8383/easy/submit`
 - Video Query: `http://127.0.0.1:8383/easy/query`
 
+#### `generate_reference_audio.py`
+Complete pipeline for creating reference audio from MP4/video files for voice cloning (created 2025-11-16).
+
+**Key Features:**
+- Accepts MP4/video from any Windows path
+- Extracts and processes audio with RNNoise denoising
+- Transcribes with faster-whisper ASR
+- Optional custom output directory
+
+**Workflow:**
+1. Extract audio to WAV (local ffmpeg)
+2. Process audio: format → denoise (RNNoise) → re-format (Docker)
+3. Transcribe with faster-whisper
+4. Optionally copy to custom directory
+
+**Usage:**
+```bash
+python scripts/generate_reference_audio.py input.mp4 [whisper_model] [output_dir]
+```
+
+**See:** `documentation/REFERENCE_AUDIO_GUIDE.md` for complete documentation
+
+#### `ffmpeg_utils.py`
+Shared utilities for FFmpeg tools (created 2025-11-16).
+
+**Functions:**
+- `find_ffmpeg_tool(tool_name)` - Find any FFmpeg tool (ffmpeg, ffprobe, etc.)
+- `find_ffmpeg()` - Find ffmpeg executable
+- `find_ffprobe()` - Find ffprobe executable
+
+**Used by:** `add_subtitles.py`, `concatenate_segments.py`, `generate_reference_audio.py`
+
+**Purpose:** Eliminates code duplication by centralizing FFmpeg path finding logic. Checks both system PATH and project resources folder.
+
 ---
 
 ## Development Conventions
@@ -115,10 +149,36 @@ End-to-end pipeline for generating avatar videos from text.
    - Check both production code AND test files for duplication
    - Don't wait for user to ask - refactor immediately
 
+   **Best Practice Workflow:**
+   ```bash
+   # Step 1: When creating new utility code, first check for existing similar code
+   grep -r "def function_name" scripts/
+
+   # Step 2: If duplication exists, create shared utility module
+   # Example: scripts/ffmpeg_utils.py, scripts/subtitle_utils.py
+
+   # Step 3: Search for ALL instances of the duplicated pattern
+   grep -r "def find_ffmpeg" scripts/
+
+   # Step 4: Refactor ALL scripts that have the duplication
+   # Don't just refactor the new script - update all existing ones too
+
+   # Step 5: Verify no duplication remains
+   grep -r "def find_ffmpeg" scripts/
+   # Should only show the utility module
+   ```
+
+   **Example:** When creating `ffmpeg_utils.py` (2025-11-16):
+   - Found `add_subtitles.py`, `concatenate_segments.py` both had `find_ffmpeg()`
+   - Refactored all 3 scripts to use shared utility
+   - Eliminated 55 lines of duplicate code
+
 2. **Complete Refactoring**
    - When refactoring, extract ALL duplicated logic, not just obvious parts
    - Includes: text processing, data structures, utility functions
+   - **Search the entire codebase** - use grep to find all instances
    - Update imports in all affected files
+   - Verify with grep that no duplication remains
 
 3. **UTF-8 Encoding**
    All Python scripts must handle Windows encoding properly:

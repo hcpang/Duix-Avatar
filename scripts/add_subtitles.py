@@ -14,6 +14,7 @@ from pathlib import Path
 # Import shared subtitle utilities
 from subtitle_utils import (normalize_word, split_into_sentences, split_into_chunks,
                              create_global_alignment, get_chunk_timing_from_alignment)
+from ffmpeg_utils import find_ffmpeg
 
 # Set UTF-8 encoding for stdout on Windows
 if sys.platform == 'win32':
@@ -527,42 +528,6 @@ def generate_srt(text, duration, max_chars=60, word_timings=None):
         srt_content.append("")  # Empty line between entries
 
     return '\n'.join(srt_content)
-
-
-def find_ffmpeg_tool(tool_name):
-    """Find FFmpeg tool executable, checking PATH and resources folder
-
-    Args:
-        tool_name: Name of the tool (e.g., 'ffmpeg', 'ffprobe', 'ffplay')
-
-    Returns:
-        Path to executable or None if not found
-    """
-    # Try system PATH first
-    try:
-        result = subprocess.run([tool_name, '-version'], capture_output=True, text=True)
-        if result.returncode == 0:
-            return tool_name
-    except FileNotFoundError:
-        pass
-
-    # Check resources folder
-    script_dir = Path(__file__).parent.parent
-    tool_paths = [
-        script_dir / 'resources' / 'ffmpeg' / 'win-amd64' / 'bin' / f'{tool_name}.exe',
-        script_dir / 'resources' / 'ffmpeg' / 'linux-x64' / 'bin' / tool_name,
-    ]
-
-    for tool_path in tool_paths:
-        if tool_path.exists():
-            return str(tool_path)
-
-    return None
-
-
-def find_ffmpeg():
-    """Find ffmpeg executable, checking PATH and resources folder"""
-    return find_ffmpeg_tool('ffmpeg')
 
 
 def burn_subtitles(video_path, srt_path, output_path, font_size=24, font_color="white"):

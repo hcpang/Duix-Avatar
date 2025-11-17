@@ -27,14 +27,14 @@ VIDEO_QUERY_URL = "http://127.0.0.1:8383/easy/query"
 DATA_DIR = "D:/duix_avatar_data/face2face/temp"
 
 
-def synthesize_audio(text, reference_audio=None, reference_text=None):
+def synthesize_audio(text, reference_audios=None, reference_texts=None):
     """
     Generate audio from text using TTS
 
     Args:
         text: Text to synthesize
-        reference_audio: (Optional) Path to reference audio for voice cloning
-        reference_text: (Optional) Text content of the reference audio
+        reference_audios: (Optional) List of paths to reference audios for voice cloning
+        reference_texts: (Optional) List of text contents of the reference audios
 
     Returns:
         Path to generated audio file if successful, None otherwise
@@ -64,10 +64,13 @@ def synthesize_audio(text, reference_audio=None, reference_text=None):
     }
 
     # Add reference audio only if provided
-    if reference_audio and reference_text:
-        tts_params["reference_audio"] = reference_audio
-        tts_params["reference_text"] = reference_text
-        print(f"  Using voice cloning with reference audio")
+    if reference_audios and reference_texts:
+        # Join multiple reference audios/texts with |||
+        tts_params["reference_audio"] = "|||".join(reference_audios)
+        tts_params["reference_text"] = "|||".join(reference_texts)
+        print(f"  Using voice cloning with {len(reference_audios)} reference audio(s)")
+        for i, audio in enumerate(reference_audios, 1):
+            print(f"    {i}. {audio}")
 
     try:
         response = requests.post(TTS_URL, json=tts_params, timeout=600)
@@ -167,7 +170,7 @@ def generate_video(audio_path, video_path):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python generate_from_text.py <text_file|text|-> [avatar_video] [reference_audio] [reference_text]")
+        print("Usage: python generate_from_text.py <text_file|text|-> [avatar_video] [ref_audio1|||ref_audio2|||...] [ref_text1|||ref_text2|||...]")
         print("\nExamples:")
         print('  # From text file:')
         print('  python generate_from_text.py my_script.txt')
@@ -175,16 +178,19 @@ def main():
         print('  # From text directly:')
         print('  python generate_from_text.py "Hello world!"')
         print()
-        print('  # From stdin:')
-        print('  echo "Hello world" | python generate_from_text.py -')
+        print('  # With single reference audio:')
+        print('  python generate_from_text.py my_script.txt /code/data/temp/avatar.mp4 \\')
+        print('    /code/data/origin_audio/ref.wav "Reference text"')
         print()
-        print('  # With custom avatar:')
-        print('  python generate_from_text.py my_script.txt /code/data/temp/avatar.mp4')
+        print('  # With multiple reference audios (||| separated):')
+        print('  python generate_from_text.py my_script.txt /code/data/temp/avatar.mp4 \\')
+        print('    "/code/data/origin_audio/ref1.wav|||/code/data/origin_audio/ref2.wav" \\')
+        print('    "Reference text 1|||Reference text 2"')
         print("\nParameters:")
         print("  text_file: Path to text file, direct text, or '-' for stdin")
         print("  avatar_video: (Optional) Path to avatar video (default: /code/data/temp/20251113182348159.mp4)")
-        print("  reference_audio: (Optional) Path to reference audio for voice cloning")
-        print("  reference_text: (Optional) Text from reference audio")
+        print("  reference_audios: (Optional) ||| separated paths to reference audios for voice cloning")
+        print("  reference_texts: (Optional) ||| separated texts from reference audios")
         sys.exit(1)
 
     # Get text input
@@ -208,12 +214,26 @@ def main():
     # Get avatar video (default or from args)
     avatar_video = sys.argv[2] if len(sys.argv) > 2 else "/code/data/temp/20251113182348159.mp4"
 
-    # Get reference audio/text (optional)
-    reference_audio = sys.argv[3] if len(sys.argv) > 3 else None
-    reference_text = sys.argv[4] if len(sys.argv) > 4 else None
+    # Get reference audio/text (optional, ||| separated)
+    reference_audios = None
+    reference_texts = None
+
+    if len(sys.argv) > 3:
+        # Split ||| separated reference audios
+        reference_audios = [a.strip() for a in sys.argv[3].split('|||')]
+
+    if len(sys.argv) > 4:
+        # Split ||| separated reference texts
+        reference_texts = [t.strip() for t in sys.argv[4].split('|||')]
+
+    # Validate that audio and text counts match
+    if reference_audios and reference_texts:
+        if len(reference_audios) != len(reference_texts):
+            print(f"Error: Number of reference audios ({len(reference_audios)}) must match number of reference texts ({len(reference_texts)})")
+            sys.exit(1)
 
     # Step 1: Synthesize audio
-    audio_path = synthesize_audio(text, reference_audio, reference_text)
+    audio_path = synthesize_audio(text, reference_audios, reference_texts)
     if not audio_path:
         print("Failed to synthesize audio")
         sys.exit(1)

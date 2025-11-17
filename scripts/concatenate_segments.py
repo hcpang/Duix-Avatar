@@ -9,6 +9,7 @@ import subprocess
 import glob
 import re
 from pathlib import Path
+from ffmpeg_utils import find_ffmpeg
 
 # Set UTF-8 encoding for stdout on Windows
 if sys.platform == 'win32':
@@ -17,30 +18,6 @@ if sys.platform == 'win32':
 
 SEGMENTS_DIR = "D:/duix_avatar_data/face2face/temp/podcast_segments"
 OUTPUT_FILE = "D:/duix_avatar_data/face2face/temp/podcast_full.mp4"
-
-
-def find_ffmpeg():
-    """Find ffmpeg executable, checking PATH and resources folder"""
-    # Try system PATH first
-    try:
-        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
-        if result.returncode == 0:
-            return 'ffmpeg'
-    except FileNotFoundError:
-        pass
-
-    # Check resources folder
-    script_dir = Path(__file__).parent.parent
-    ffmpeg_paths = [
-        script_dir / 'resources' / 'ffmpeg' / 'win-amd64' / 'bin' / 'ffmpeg.exe',
-        script_dir / 'resources' / 'ffmpeg' / 'linux-x64' / 'bin' / 'ffmpeg',
-    ]
-
-    for ffmpeg_path in ffmpeg_paths:
-        if ffmpeg_path.exists():
-            return str(ffmpeg_path)
-
-    return None
 
 
 def find_segments():
