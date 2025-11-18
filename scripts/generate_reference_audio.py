@@ -21,6 +21,8 @@ import json
 import datetime
 import shutil
 from ffmpeg_utils import find_ffmpeg
+from transcribe_audio import transcribe_audio_file
+from docker_path_utils import to_docker_path, to_windows_path
 
 # Set UTF-8 encoding for stdout on Windows
 if sys.platform == 'win32':
@@ -47,10 +49,8 @@ def process_audio_with_rnnoise(input_wav):
     print("\n[Step 1] Processing audio (format, denoise, re-format)...")
     print(f"  Input: {input_wav}")
 
-    # Convert to container path (handle both D: and d:)
-    container_path = input_wav.replace('\\', '/')
-    container_path = container_path.replace('D:/duix_avatar_data/voice/data/', '/code/data/')
-    container_path = container_path.replace('d:/duix_avatar_data/voice/data/', '/code/data/')
+    # Convert to container path
+    container_path = to_docker_path(input_wav, service='asr')
 
     # Generate output paths
     basename = os.path.basename(input_wav)
@@ -95,7 +95,7 @@ def process_audio_with_rnnoise(input_wav):
         print(f"    ✓ Re-formatted")
 
         # Convert container path back to Windows path
-        windows_path = final_container.replace('/code/data/', 'd:/duix_avatar_data/voice/data/').replace('/', '\\')
+        windows_path = to_windows_path(final_container, base_dir='voice')
 
         print(f"  ✓ Audio processing complete: {os.path.basename(windows_path)}")
         return windows_path
@@ -105,40 +105,6 @@ def process_audio_with_rnnoise(input_wav):
         return None
     except Exception as e:
         print(f"    Error: {e}")
-        return None
-
-
-def transcribe_audio(audio_path, model_size="base"):
-    """
-    Transcribe audio using faster-whisper.
-
-    Args:
-        audio_path: Path to audio file (Windows path)
-        model_size: Whisper model size (tiny, base, small, medium, large)
-
-    Returns:
-        Transcription text or None if failed
-    """
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        print("    Error: faster-whisper not installed. Install with: pip install faster-whisper")
-        return None
-
-    try:
-        # Load model (cached after first load)
-        model = WhisperModel(model_size, device="cpu", compute_type="int8")
-
-        # Transcribe
-        segments, info = model.transcribe(audio_path, language=None)
-
-        # Collect all text from segments
-        text = " ".join([segment.text for segment in segments])
-
-        return text.strip()
-
-    except Exception as e:
-        print(f"    Error transcribing: {e}")
         return None
 
 
@@ -244,9 +210,10 @@ def main():
     for i, audio_file in enumerate(audio_files, 1):
         print(f"\n  [{i}/{len(audio_files)}] Transcribing: {os.path.basename(audio_file)}")
 
-        transcription = transcribe_audio(audio_file, whisper_model)
+        result = transcribe_audio_file(audio_file, model_size=whisper_model, language=None)
 
-        if transcription:
+        if result:
+            transcription = result['transcription']
             print(f"    ✓ Transcription: {transcription}")
 
             # Save transcription to .txt file
@@ -256,8 +223,7 @@ def main():
             print(f"    ✓ Saved to: {txt_file}")
 
             # Convert back to container path for the result
-            container_audio = audio_file.replace('d:\\duix_avatar_data\\voice\\data\\', '/code/data/')
-            container_audio = container_audio.replace('\\', '/')
+            container_audio = to_docker_path(audio_file, service='asr')
 
             results.append({
                 "audio": container_audio,

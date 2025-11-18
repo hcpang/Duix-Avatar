@@ -15,19 +15,13 @@ from pathlib import Path
 from subtitle_utils import (normalize_word, split_into_sentences, split_into_chunks,
                              create_global_alignment, get_chunk_timing_from_alignment)
 from ffmpeg_utils import find_ffmpeg
+from transcribe_audio import transcribe_audio_file, WHISPER_AVAILABLE
 
 # Set UTF-8 encoding for stdout on Windows
 if sys.platform == 'win32':
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-
-# Try to import faster-whisper for accurate timing
-try:
-    from faster_whisper import WhisperModel
-    WHISPER_AVAILABLE = True
-except ImportError:
-    WHISPER_AVAILABLE = False
 
 # Try to import websocket for local ASR
 try:
@@ -39,32 +33,56 @@ except ImportError:
 
 
 def get_audio_duration(audio_path):
-    """Get duration of audio file in seconds"""
+    """Get duration of audio file in seconds using wave or ffprobe"""
     try:
         with wave.open(audio_path, 'r') as audio_file:
             frames = audio_file.getnframes()
             rate = audio_file.getframerate()
-            duration = frames / float(rate)
-            return duration
-    except Exception as e:
-        print(f"Warning: Could not read audio duration from WAV file: {e}")
-        # Try using ffprobe as fallback
-        ffprobe_cmd = find_ffmpeg_tool('ffprobe')
-        if not ffprobe_cmd:
-            print("Error: ffprobe not found")
-            return None
-
+            return frames / float(rate)
+    except:
+        # Fallback to ffprobe
         try:
-            result = subprocess.run(
-                [ffprobe_cmd, '-v', 'error', '-show_entries', 'format=duration',
-                 '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
-                capture_output=True,
-                text=True
-            )
-            return float(result.stdout.strip())
-        except Exception as e2:
-            print(f"Error: Could not determine audio duration: {e2}")
-            return None
+            from ffmpeg_utils import find_ffmpeg_tool
+            ffprobe_cmd = find_ffmpeg_tool('ffprobe')
+            if ffprobe_cmd:
+                result = subprocess.run(
+                    [ffprobe_cmd, '-v', 'error', '-show_entries', 'format=duration',
+                     '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
+                    capture_output=True, text=True
+                )
+                return float(result.stdout.strip())
+        except:
+            pass
+    return None
+
+
+def get_word_timestamps(audio_path, text):
+    """
+    Get word-level timestamps from Whisper and align to user's original text.
+
+    This uses transcribe_audio.py for transcription, then aligns the result
+    to the user's original text using global alignment.
+    """
+    print("  Using Whisper for accurate word-level timing...")
+
+    # Transcribe using the shared transcribe_audio_file function
+    result = transcribe_audio_file(audio_path, model_size="tiny", language="en")
+
+    if not result:
+        print("  Warning: Whisper transcription failed")
+        return None
+
+    word_timings = result['word_timings']
+
+    # Map user's original text to Whisper word timings
+    print(f"  ✓ Mapping your original text with accurate start times...")
+    aligned_segments = map_text_to_word_timings(text, word_timings, max_chars=60)
+
+    if aligned_segments:
+        print(f"  ✓ Created {len(aligned_segments)} subtitle segments with accurate timing")
+        return aligned_segments
+
+    return None
 
 
 def split_into_sentences(text):
@@ -182,50 +200,6 @@ def get_timestamps_from_local_asr(audio_path):
 
     except Exception as e:
         print(f"  Warning: Local ASR failed ({e})")
-        return None
-
-
-def get_word_timestamps(audio_path, text):
-    """Get timing from Whisper and map user's original text with accurate start times"""
-    if not WHISPER_AVAILABLE:
-        return None
-
-    try:
-        print("  Using Whisper for accurate word-level timing...")
-        # Use tiny model for speed (can use 'base' or 'small' for better accuracy)
-        model = WhisperModel("tiny", device="cpu", compute_type="int8")
-
-        # Transcribe to get word-level timestamps
-        segments, info = model.transcribe(
-            audio_path,
-            word_timestamps=True,
-            language="en"
-        )
-
-        # Extract word-level timestamps
-        word_timings = []
-        for segment in segments:
-            if hasattr(segment, 'words') and segment.words:
-                for word in segment.words:
-                    word_timings.append({
-                        'word': word.word.strip(),
-                        'start': word.start,
-                        'end': word.end
-                    })
-
-        if word_timings:
-            print(f"  ✓ Got {len(word_timings)} word timestamps from Whisper")
-            # Map user's original text to these word timings
-            print(f"  ✓ Mapping your original text with accurate start times...")
-            aligned_segments = map_text_to_word_timings(text, word_timings, max_chars=60)
-            if aligned_segments:
-                print(f"  ✓ Created {len(aligned_segments)} subtitle segments with accurate timing")
-                return aligned_segments
-
-        return None
-
-    except Exception as e:
-        print(f"  Warning: Whisper failed ({e}), falling back to even distribution")
         return None
 
 

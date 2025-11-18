@@ -13,6 +13,9 @@ import json
 import os
 import io
 
+from docker_path_utils import to_docker_path
+from avatar_video_utils import generate_video
+
 # Set UTF-8 encoding for stdout on Windows
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -73,7 +76,7 @@ def synthesize_audio(text, reference_audios=None, reference_texts=None):
             print(f"    {i}. {audio}")
 
     try:
-        response = requests.post(TTS_URL, json=tts_params, timeout=600)
+        response = requests.post(TTS_URL, json=tts_params, timeout=10800)  # 3 hours for long texts
 
         # The response should be the audio file
         if response.status_code == 200:
@@ -96,76 +99,7 @@ def synthesize_audio(text, reference_audios=None, reference_texts=None):
         return None
 
 
-def generate_video(audio_path, video_path):
-    """Generate a video using the Duix Avatar API"""
-
-    task_code = str(uuid.uuid4())
-
-    print(f"\nSubmitting video generation task...")
-    print(f"  Audio: {audio_path}")
-    print(f"  Avatar: {video_path}")
-    print(f"  Task Code: {task_code}")
-
-    submit_params = {
-        "audio_url": audio_path,
-        "video_url": video_path,
-        "code": task_code,
-        "chaofen": 0,
-        "watermark_switch": 0,
-        "pn": 1
-    }
-
-    try:
-        response = requests.post(VIDEO_SUBMIT_URL, json=submit_params, timeout=10)
-        result = response.json()
-        print(f"Submit Response: {json.dumps(result, indent=2)}")
-
-        if result.get('code') != 10000:
-            print(f"Error: Failed to submit task - {result.get('msg', 'Unknown error')}")
-            return None
-
-    except Exception as e:
-        print(f"Error submitting request: {e}")
-        return None
-
-    # Poll for completion
-    print("\nWaiting for video generation to complete...")
-    max_wait_time = 600
-    poll_interval = 2
-    elapsed_time = 0
-
-    while elapsed_time < max_wait_time:
-        try:
-            time.sleep(poll_interval)
-            elapsed_time += poll_interval
-
-            response = requests.get(f"{VIDEO_QUERY_URL}?code={task_code}", timeout=10)
-            status_result = response.json()
-
-            if status_result.get('code') == 10000:
-                data = status_result.get('data', {})
-                status = data.get('status')
-                progress = data.get('progress', 0)
-                msg = data.get('msg', '')
-
-                if status == 1:
-                    print(f"  Progress: {progress}% - {msg}")
-                elif status == 2:
-                    result_path = data.get('result')
-                    full_path = f"D:/duix_avatar_data/face2face/{result_path}"
-                    print(f"\n✓ Video generation completed!")
-                    print(f"  Output: {full_path}")
-                    return full_path
-                elif status == 3:
-                    print(f"\n✗ Video generation failed: {msg}")
-                    return None
-
-        except Exception as e:
-            print(f"Error checking status: {e}")
-            continue
-
-    print(f"\n✗ Timeout: Video generation did not complete within {max_wait_time} seconds")
-    return None
+# generate_video function now imported from avatar_video_utils
 
 
 def main():
@@ -186,9 +120,13 @@ def main():
         print('  python generate_from_text.py my_script.txt /code/data/temp/avatar.mp4 \\')
         print('    "/code/data/origin_audio/ref1.wav|||/code/data/origin_audio/ref2.wav" \\')
         print('    "Reference text 1|||Reference text 2"')
+        print()
+        print('  # TTS only (no video generation):')
+        print('  python generate_from_text.py my_script.txt - \\')
+        print('    /code/data/origin_audio/ref.wav "Reference text"')
         print("\nParameters:")
         print("  text_file: Path to text file, direct text, or '-' for stdin")
-        print("  avatar_video: (Optional) Path to avatar video (default: /code/data/temp/20251113182348159.mp4)")
+        print("  avatar_video: (Optional) Path to avatar video, or '-'/'none' to skip video generation")
         print("  reference_audios: (Optional) ||| separated paths to reference audios for voice cloning")
         print("  reference_texts: (Optional) ||| separated texts from reference audios")
         sys.exit(1)
@@ -211,8 +149,12 @@ def main():
 
     print(f"Text length: {len(text)} characters")
 
-    # Get avatar video (default or from args)
-    avatar_video = sys.argv[2] if len(sys.argv) > 2 else "/code/data/temp/20251113182348159.mp4"
+    # Get avatar video (optional)
+    avatar_video = sys.argv[2] if len(sys.argv) > 2 else None
+
+    # Check if user wants to skip video generation
+    if avatar_video and avatar_video.lower() in ['-', 'none']:
+        avatar_video = None
 
     # Get reference audio/text (optional, ||| separated)
     reference_audios = None
@@ -238,9 +180,16 @@ def main():
         print("Failed to synthesize audio")
         sys.exit(1)
 
-    # Convert to container path (normalize Windows backslashes to forward slashes first)
-    audio_path_normalized = audio_path.replace("\\", "/")
-    audio_container_path = audio_path_normalized.replace("D:/duix_avatar_data/face2face", "/code/data")
+    # If no avatar video specified, exit after TTS
+    if not avatar_video:
+        print(f"\n{'='*60}")
+        print(f"SUCCESS! TTS audio generated:")
+        print(f"  {audio_path}")
+        print(f"{'='*60}")
+        sys.exit(0)
+
+    # Convert to container path
+    audio_container_path = to_docker_path(audio_path)
 
     # Step 2: Generate video
     video_path = generate_video(audio_container_path, avatar_video)

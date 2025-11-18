@@ -14,6 +14,8 @@ import time
 import uuid
 import subprocess
 
+from docker_path_utils import to_docker_path
+
 # Set UTF-8 encoding for stdout on Windows
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -157,8 +159,7 @@ def generate_video(audio_path, avatar_name):
     print(f"  Submitting video generation...")
 
     # Convert to container path
-    audio_path_normalized = audio_path.replace("\\", "/")
-    audio_container_path = audio_path_normalized.replace("D:/duix_avatar_data/face2face", "/code/data")
+    audio_container_path = to_docker_path(audio_path)
 
     submit_params = {
         "audio_url": audio_container_path,
