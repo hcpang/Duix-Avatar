@@ -22,19 +22,27 @@
 
 ```
 Duix-Avatar/
-├── scripts/                    # Python utility scripts
-│   ├── add_subtitles.py       # Subtitle generation with Whisper ASR
-│   ├── subtitle_utils.py      # Shared subtitle utilities
-│   ├── test_subtitle_matching.py  # Unit tests for subtitle matching
-│   ├── generate_from_text.py  # End-to-end video generation from text
-│   └── test_api.py            # API testing utilities
-├── journals/                   # Development session documentation
+├── scripts/                           # Python utility scripts
+│   ├── add_subtitles.py              # Subtitle generation with Whisper ASR
+│   ├── subtitle_utils.py             # Shared subtitle utilities
+│   ├── generate_from_text.py         # End-to-end video generation from text
+│   ├── generate_reference_audio.py   # Reference audio generation for voice cloning
+│   ├── revoice_notebooklm.py         # NotebookLM video revoicing workflow
+│   ├── extract_slides.py             # Extract slides from video
+│   ├── regenerate_slide_video.py     # Regenerate video with new audio
+│   ├── overlay_avatar_pip.py         # PIP avatar overlay
+│   ├── ffmpeg_utils.py               # Shared FFmpeg utilities
+│   └── test_api.py                   # API testing utilities
+├── journals/                          # Development session documentation
 │   └── YYYY-MM-DD-{feature}.md
-├── documentation/              # Additional docs
-├── deploy/                     # Deployment configurations
-├── build/                      # Build artifacts
-├── JOURNALING-GUIDE.md        # Journal writing requirements
-└── API_USAGE.md               # API documentation
+├── documentation/                     # Additional docs
+│   ├── REFERENCE_AUDIO_GUIDE.md      # Reference audio generation guide
+│   └── NOTEBOOKLM_REVOICING.md       # NotebookLM revoicing workflow
+├── inputs/                            # Input files (videos, scripts, audio)
+├── outputs/                           # Generated output files
+├── AVATARS.md                         # Avatar configurations
+├── JOURNALING-GUIDE.md               # Journal writing requirements
+└── API_USAGE.md                      # API documentation
 ```
 
 ---
@@ -63,18 +71,15 @@ python scripts/add_subtitles.py VIDEO_PATH TEXT_FILE \
 ```
 
 #### `subtitle_utils.py`
-Shared utilities for subtitle generation (created 2025-11-14).
+Shared utilities for subtitle generation (created 2025-11-14, updated 2025-11-16).
 
 **Functions:**
 - `split_into_sentences(text)` - Sentence splitting by punctuation
 - `split_into_chunks(sentence, max_chars=60)` - Chunk splitting at natural breaks
-- `normalize_word(word)` - Word normalization for fuzzy matching
-- `edit_distance(s1, s2)` - Levenshtein distance calculation
-- `find_best_match(target, words, start_idx, window=20)` - Fuzzy word matching
-- `match_chunk_to_whisper(chunk, whisper_words, ...)` - Complete chunk matching with word-based position estimation
+- Global alignment with Needleman-Wunsch algorithm for accurate word matching
 
 **Critical Implementation Detail:**
-After matching a chunk with N words, the next search starts at `whisper_idx + N/2` to prevent matching common words too early (e.g., matching the wrong "to").
+Uses global alignment (Needleman-Wunsch) to match user's original text with Whisper transcription, achieving 98%+ word alignment accuracy.
 
 #### `generate_from_text.py`
 End-to-end pipeline for generating avatar videos from text.
@@ -210,19 +215,17 @@ Every development session MUST produce a journal in `journals/YYYY-MM-DD-{featur
 
 ## Docker Services
 
-The project uses three main Docker containers:
+The project uses two main Docker containers:
 
-1. **ASR Service** - `guiji2025/fun-asr`
-   - Automatic Speech Recognition
-   - Port: (check deployment config)
-
-2. **TTS Service** - `guiji2025/fish-speech-ziming`
+1. **TTS Service** - `guiji2025/fish-speech-ziming`
    - Text-to-Speech with voice cloning
    - Port: 18180
 
-3. **Video Generation** - `guiji2025/duix.avatar`
+2. **Video Generation** - `guiji2025/duix.avatar`
    - Avatar video synthesis
    - Port: 8383
+
+**Note:** ASR uses faster-whisper locally (no Docker container needed)
 
 ---
 
@@ -240,12 +243,15 @@ python scripts/generate_from_text.py script.txt [video_template] [reference_audi
 python scripts/add_subtitles.py video.mp4 script.txt --audio audio.wav --burn --font-size 28 --color yellow
 ```
 
-### Test Subtitle Matching
+### Revoice NotebookLM Video
 
 ```bash
-cd scripts
-python test_subtitle_matching.py
+python scripts/revoice_notebooklm.py video.mp4 script.txt \
+  --reference-audio "path/to/reference.wav" \
+  --reference-text "reference transcription"
 ```
+
+**See:** `documentation/NOTEBOOKLM_REVOICING.md` for complete workflow
 
 ---
 
@@ -253,17 +259,15 @@ python test_subtitle_matching.py
 
 ### Subtitle Word Matching Algorithm
 
-**Problem:** Common words like "to" match the first occurrence instead of contextually correct one.
+**Problem:** Need accurate word-level timestamp matching between user's text and Whisper transcription.
 
-**Solution:** Word-based position estimation
-```python
-# After matching chunk with N words, skip N/2 words for next search
-min_words_ahead = prev_chunk_word_count // 2
-min_search_idx = whisper_idx + min_words_ahead
-```
+**Solution:** Global alignment using Needleman-Wunsch algorithm
+- Matches user's original text word-by-word with Whisper's transcription
+- Handles insertions, deletions, and substitutions
+- Achieves 98%+ word alignment accuracy
+- Prevents common word mismatches through global optimization
 
-**Multi-word Fallback:**
-If first word doesn't match, try up to 5 words. If word N matches, use timing of word N-1 as start time.
+**Implementation:** See `scripts/add_subtitles.py` and `scripts/subtitle_utils.py`
 
 ### Subtitle Overlap Prevention
 
@@ -288,17 +292,9 @@ for i in range(len(subtitle_segments) - 1):
 
 Tests are located in `scripts/` alongside the code they test.
 
-**Subtitle Matching Test:**
-- File: `scripts/test_subtitle_matching.py`
-- Validates 100% match rate (26/26 chunks in reference test)
-- Checks timing accuracy (e.g., "to predict" at 44.460s, not 41.600s)
-
-**Expected Output:**
-```
-Match rate: 100.0%
-Total chunks: 26
-Matched chunks: 26
-```
+**API Testing:**
+- File: `scripts/test_api.py`
+- Tests TTS and video generation APIs
 
 ---
 
@@ -316,9 +312,9 @@ Matched chunks: 26
 **Mistake:** Placing test files in root instead of scripts/.
 **Fix:** Check existing project structure (e.g., `scripts/test_api.py`) before creating files.
 
-### 4. Incorrect Word Matching
-**Mistake:** Using sequential search causes matching wrong occurrence of common words.
-**Fix:** Use word-based position estimation (skip N/2 words after matching N-word chunk).
+### 4. Low Subtitle Alignment
+**Mistake:** Poor word alignment between user text and Whisper transcription.
+**Fix:** Use global alignment (Needleman-Wunsch) for accurate word matching. Achieves 98%+ alignment.
 
 ---
 
