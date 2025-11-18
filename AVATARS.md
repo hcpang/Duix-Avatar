@@ -114,6 +114,46 @@ python scripts/generate_from_text.py my_script.txt \
 
 ---
 
+## Jimmy2
+
+**Description**: English-speaking avatar with clear professional voice
+
+**Reference Video**:
+```
+/code/data/temp/Jimmy2_pip_small.mp4
+```
+Windows path: `D:/duix_avatar_data/face2face/temp/Jimmy2_pip_small.mp4`
+- Resolution: 384x288 (small for PIP)
+- Source: `inputs/Jimmy2.mp4` (reduced from 1440x1080)
+
+**Reference Audio**:
+```
+/code/data/origin_audio/format_denoise_temp_extract_20251117220215646.wav
+```
+Windows path: `D:/duix_avatar_data/voice/data/origin_audio/format_denoise_temp_extract_20251117220215646.wav`
+
+**Reference Text**:
+```
+In their most recent paper, researchers at DeepMind dissect the conventional wisdom that more complex models equal better performance. The company has uncovered a previously untapped method of scaling large language models.
+```
+
+**Usage Example**:
+```bash
+# Generate video with Jimmy2 avatar
+python scripts/generate_from_text.py my_script.txt \
+  /code/data/temp/Jimmy2_pip_small.mp4 \
+  /code/data/origin_audio/format_denoise_temp_extract_20251117220215646.wav \
+  "In their most recent paper, researchers at DeepMind dissect the conventional wisdom that more complex models equal better performance. The company has uncovered a previously untapped method of scaling large language models."
+```
+
+**Generated Videos**:
+- The Five Tenets of Trading (2025-11-17): `outputs/The_Five_Tenets_of_Trading/final_video_subtitled.mp4`
+  - Duration: 151 seconds (2:31)
+  - Resolution: 1920x1080 (slide video)
+  - With subtitles: Yellow, 24pt font
+
+---
+
 ## Template for New Avatars
 
 When adding a new avatar, copy this template:
